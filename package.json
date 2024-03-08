@@ -1,0 +1,16 @@
+{
+  "name": "node-tls-mock",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "vitest"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@open-draft/deferred-promise": "^2.2.0",
+    "vitest": "^1.3.1"
+  }
+}
