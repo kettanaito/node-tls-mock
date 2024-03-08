@@ -1,9 +1,16 @@
 import tls from 'node:tls'
 import net from 'node:net'
 import { STATUS_CODES } from 'node:http'
-import { DeferredPromise } from '@open-draft/deferred-promise'
 
-tls.connect = function (...args) {
+const originalTlsConnect = tls.connect
+tls.connect = function mockTlsConnect(...args) {
+  const [options, callback] = net._normalizeArgs(args)
+  return new MockTlsSocket(options, callback)
+}
+
+const OriginalSocket = net.Socket
+const originalSocketConnect = net.Socket.prototype.connect
+net.Socket.prototype.connect = function mockSocketConnect(...args) {
   const [options, callback] = net._normalizeArgs(args)
   return new MockSocket(options, callback)
 }
@@ -13,8 +20,6 @@ class MockSocket extends net.Socket {
     super()
     this.options = options
     this.callback = callback
-    this.socket = null
-    this.connectionPromise = new DeferredPromise()
     this.error = null
     this.requestBuffer = []
 
@@ -22,31 +27,20 @@ class MockSocket extends net.Socket {
   }
 
   connect() {
+    console.trace('MockSocket.connect()')
     this.connecting = true
-
-    // Try establishing an actual connecting to this address.
-    this.socket = new net.Socket()
-    this.socket.connect(this.options)
-
-    this.socket
-      .once('connect', () => {
-        this.socket.pause()
-
-        this.connecting = false
-        this.emit('connect')
-        this.connectionPromise.resolve()
-      })
-      .once('secureConnect', () => this.emit('secureConnect'))
-      .once('ready', () => this.emit('ready'))
-      .once('error', () => {
-        this.connectionPromise.reject()
-      })
   }
 
   write(chunk, encoding, callback) {
-    console.log('write:', chunk, encoding)
+    // console.log('write:', chunk, encoding)
     this.requestBuffer.push([chunk, encoding, callback])
-    return true
+
+    // TODO: This will be signalled by the HTTP parser.
+    if (chunk === '') {
+      this.emit('request')
+    }
+
+    return false
   }
 
   push(chunk, encoding) {
@@ -65,38 +59,22 @@ class MockSocket extends net.Socket {
   }
 
   async passthrough() {
-    await this.connectionPromise
+    console.log('MockSocket.passthrough()')
 
-    console.log('passthrough')
+    // Establish the actual Socket connection.
+    // Applying it to this class will automatically
+    // forward all the writes/pushes/events.
+    const socket = originalSocketConnect.apply(this, [
+      this.options,
+      this.callback,
+    ])
 
-    // Replay the connection error.
-    if (this.error) {
-      this._hadError = true
-      this.destroy(this.error)
-      return
-    }
-
-    console.log('writing chunks...', this.requestBuffer)
+    console.log('writing chunks', this.requestBuffer)
     for (const [chunk, encoding, callback] of this.requestBuffer) {
-      this.socket.write(chunk, encoding, callback)
+      socket.write(chunk, encoding, callback)
     }
 
-    console.log('request written!', this.socket.destroyed)
-
-    this.socket
-      .on('data', (chunk) => this.emit('data', chunk))
-      .on('drain', () => this.emit('drain'))
-      .on('timeout', () => this.emit('timeout'))
-      .on('error', (error) => {
-        console.trace(error)
-
-        this._hadError = true
-        this.emit('error', error)
-      })
-      .on('close', (hadError) => this.emit('close', hadError))
-      .on('end', () => this.emit('end'))
-
-    this.socket.resume()
+    console.log('request written!')
   }
 
   /**
@@ -104,19 +82,6 @@ class MockSocket extends net.Socket {
    * to this socket.
    */
   async respondWith(response) {
-    console.log(this.socket.connecting)
-
-    await this.connectionPromise
-
-    console.log(this.socket.connecting)
-
-    // if (!socket) {
-    //   this.connecting = false
-    //   console.log('MockSocket emitting "connect"')
-    //   this.emit('connect')
-    //   this.emit('ready')
-    // }
-
     this.emit('resume')
 
     const httpHeaders = []
@@ -155,5 +120,52 @@ class MockSocket extends net.Socket {
 
     this.push('\r\n')
     this.push(null)
+  }
+}
+
+class MockTlsSocket extends tls.TLSSocket {
+  constructor(options, callback) {
+    const socket = new MockSocket(options, callback)
+    super(socket)
+    this.options = options
+    this.callback = callback
+    this.socket = socket
+
+    this.socket.on('connect', () => {
+      this.emit('secureConnect')
+    })
+
+    // TODO: Remove this, really.
+    this.socket.on('request', () => {
+      this.emit('request')
+    })
+  }
+
+  write(chunk, encoding, callback) {
+    this.socket.write(chunk, encoding, callback)
+  }
+
+  push(chunk) {
+    this.socket.push(chunk)
+  }
+
+  passthrough() {
+    console.log('TLS passthrough')
+    // this.socket.passthrough()
+
+    const tlsSocket = new tls.TLSSocket(new OriginalSocket(), this.options)
+    if (this.callback) {
+      tlsSocket.once('secureConnect', this.callback)
+    }
+
+    // originalTlsConnect.apply(this, [this.options, this.callback])
+
+    this.socket.on('data', (chunk) => this.emit('data', chunk))
+    this.socket.on('error', (error) => {
+      console.trace(error)
+
+      this.emit('error', error)
+    })
+    this.socket.on('end', () => this.emit('end'))
   }
 }

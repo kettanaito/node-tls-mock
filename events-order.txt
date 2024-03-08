@@ -1,0 +1,14 @@
+net.Socket:
+- resume
+- lookup
+- connect
+- ready
+- session (with certificate as Buffer chunk)
+    multiple times
+- data (actual response data)
+
+- readable
+- end
+- prefinish
+- finish
+- close
